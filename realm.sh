@@ -8,6 +8,13 @@ CONFIG_FILE="/etc/realm/realm.toml"
 SERVICE_FILE="/etc/systemd/system/realm.service"
 SERVICE_NAME="realm.service"
 
+# 颜色定义
+GREEN='\033[0;32m'
+NC='\033[0m'  # 重置颜色
+
+# 分隔线定义
+SEPARATOR="=============================="
+
 # 检查是否以 root 用户运行
 if [ "$EUID" -ne 0 ]; then
   echo "请以 root 用户运行此脚本"
@@ -84,15 +91,15 @@ EOF
 
 # 显示管理菜单
 function show_menu() {
-  echo "=============================="
+  echo "$SEPARATOR"
   echo "          Realm 管理脚本      "
-  echo "=============================="
+  echo "$SEPARATOR"
   echo "1. 添加转发规则"
   echo "2. 删除转发规则"
   echo "3. 查看已有规则"
   echo "4. 卸载 realm"
   echo "0. 退出并重启服务"
-  echo "=============================="
+  echo "$SEPARATOR"
 }
 
 # 检查 IP:端口 格式是否有效
@@ -118,173 +125,156 @@ function is_port_used() {
 # 添加转发规则
 function add_rule() {
   while true; do
-    echo "=============================="
+    echo "$SEPARATOR"
     echo "          添加转发规则        "
-    echo "=============================="
-    echo "1. 添加新规则"
-    echo "2. 返回"
-    echo "=============================="
-    read -p "请输入选项 (1-2): " ADD_OPTION
+    echo "$SEPARATOR"
 
-    case $ADD_OPTION in
-      1)
-        while true; do
-          read -p "请输入转发端口（1-65535）: " FORWARD_PORT
-          if [[ $FORWARD_PORT =~ ^[0-9]+$ ]] && [ $FORWARD_PORT -ge 1 ] && [ $FORWARD_PORT -le 65535 ]; then
-            if is_port_used "$FORWARD_PORT"; then
-              echo "错误：转发端口 $FORWARD_PORT 已被占用"
-            else
-              break
-            fi
-          else
-            echo "错误：转发端口必须是 1-65535 之间的数字"
-          fi
-        done
-
-        while true; do
-          read -p "请输入欲转发地址（例如 1.1.1.1:443）: " TARGET_ADDRESS
-          if validate_ip_port "$TARGET_ADDRESS"; then
-            break
-          else
-            echo "错误：欲转发地址格式无效，请输入 IP:端口"
-          fi
-        done
-
-        read -p "请输入规则别名（例如 游戏服务器）: " ALIAS
-
-        # 检查端口是否已存在
-        if grep -q "listen = \"0.0.0.0:$FORWARD_PORT\"" "$CONFIG_FILE"; then
-          echo "错误：转发端口 $FORWARD_PORT 已存在"
-          return
+    while true; do
+      read -p "请输入转发端口（1-65535）: " FORWARD_PORT
+      if [[ $FORWARD_PORT =~ ^[0-9]+$ ]] && [ $FORWARD_PORT -ge 1 ] && [ $FORWARD_PORT -le 65535 ]; then
+        if is_port_used "$FORWARD_PORT"; then
+          echo "错误：转发端口 $FORWARD_PORT 已被占用"
+        else
+          break
         fi
+      else
+        echo "错误：转发端口必须是 1-65535 之间的数字"
+      fi
+    done
 
-        # 添加规则到配置文件
-        echo -e "\n[[endpoints]]" >> "$CONFIG_FILE"
-        echo "alias = \"$ALIAS\"" >> "$CONFIG_FILE"
-        echo "listen = \"0.0.0.0:$FORWARD_PORT\"" >> "$CONFIG_FILE"
-        echo "remote = \"$TARGET_ADDRESS\"" >> "$CONFIG_FILE"
-        echo "已添加转发规则：$ALIAS -- 0.0.0.0:$FORWARD_PORT -> $TARGET_ADDRESS"
-        ;;
-      2)
-        return  # 直接返回主菜单
-        ;;
-      *)
-        echo "错误：无效的选项"
-        ;;
-    esac
+    while true; do
+      read -p "请输入欲转发地址（例如 1.1.1.1:443）: " TARGET_ADDRESS
+      if validate_ip_port "$TARGET_ADDRESS"; then
+        break
+      else
+        echo "错误：欲转发地址格式无效，请输入 IP:端口"
+      fi
+    done
+
+    read -p "请输入规则别名（例如 游戏服务器）: " ALIAS
+
+    # 检查端口是否已存在
+    if grep -q "listen = \"0.0.0.0:$FORWARD_PORT\"" "$CONFIG_FILE"; then
+      echo "错误：转发端口 $FORWARD_PORT 已存在"
+      return
+    fi
+
+    # 添加规则到配置文件
+    echo -e "\n[[endpoints]]" >> "$CONFIG_FILE"
+    echo "alias = \"$ALIAS\"" >> "$CONFIG_FILE"
+    echo "listen = \"0.0.0.0:$FORWARD_PORT\"" >> "$CONFIG_FILE"
+    echo "remote = \"$TARGET_ADDRESS\"" >> "$CONFIG_FILE"
+    echo "已添加转发规则：$ALIAS -- 0.0.0.0:$FORWARD_PORT -> $TARGET_ADDRESS"
+
+    # 询问是否继续添加
+    read -p "是否继续添加规则？(y/n): " CONTINUE
+    if [[ $CONTINUE != "y" && $CONTINUE != "Y" ]]; then
+      break
+    fi
   done
 }
 
 # 删除转发规则
 function remove_rule() {
   while true; do
-    echo "=============================="
+    # 获取所有转发规则
+    RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
+
+    if [ ${#RULES[@]} -eq 0 ]; then
+      echo "错误：没有找到任何转发规则"
+      return
+    fi
+
+    # 显示规则列表
+    echo "$SEPARATOR"
     echo "          删除转发规则        "
-    echo "=============================="
-    echo "1. 删除规则"
-    echo "2. 返回"
-    echo "=============================="
-    read -p "请输入选项 (1-2): " REMOVE_OPTION
+    echo "$SEPARATOR"
+    echo "请选择要删除的转发规则："
+    for i in "${!RULES[@]}"; do
+      ALIAS=$(sed -n "$((RULES[i]+1))p" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2)
+      LISTEN=$(sed -n "$((RULES[i]+2))p" "$CONFIG_FILE" | grep "listen" | cut -d '"' -f 2)
+      REMOTE=$(sed -n "$((RULES[i]+3))p" "$CONFIG_FILE" | grep "remote" | cut -d '"' -f 2)
+      echo "$((i+1)). $ALIAS -- $LISTEN -> $REMOTE"
+    done
+    echo "$SEPARATOR"
+    read -p "请输入选项 (回车返回): " CHOICE
 
-    case $REMOVE_OPTION in
-      1)
-        # 获取所有转发规则
-        RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
+    # 如果用户直接按回车，则返回
+    if [[ -z $CHOICE ]]; then
+      return
+    fi
 
-        if [ ${#RULES[@]} -eq 0 ]; then
-          echo "错误：没有找到任何转发规则"
-          return
-        fi
+    # 检查输入是否有效
+    if [[ ! $CHOICE =~ ^[0-9]+$ ]] || [ $CHOICE -lt 1 ] || [ $CHOICE -gt ${#RULES[@]} ]; then
+      echo "错误：无效的选择"
+      continue
+    fi
 
-        # 显示规则列表
-        echo "请选择要删除的转发规则："
-        for i in "${!RULES[@]}"; do
-          ALIAS=$(sed -n "$((RULES[i]+1))p" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2)
-          LISTEN=$(sed -n "$((RULES[i]+2))p" "$CONFIG_FILE" | grep "listen" | cut -d '"' -f 2)
-          REMOTE=$(sed -n "$((RULES[i]+3))p" "$CONFIG_FILE" | grep "remote" | cut -d '"' -f 2)
-          echo "$((i+1)). $ALIAS -- $LISTEN -> $REMOTE"
-        done
+    # 获取选择的规则
+    SELECTED_RULE_LINE=${RULES[$((CHOICE-1))]}
 
-        # 读取用户输入
-        read -p "请输入规则编号 (1-${#RULES[@]}): " CHOICE
+    # 备份配置文件
+    cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
 
-        # 检查输入是否有效
-        if [[ ! $CHOICE =~ ^[0-9]+$ ]] || [ $CHOICE -lt 1 ] || [ $CHOICE -gt ${#RULES[@]} ]; then
-          echo "错误：无效的选择"
-          return
-        fi
+    # 使用sed删除指定的块
+    sed -i "$((SELECTED_RULE_LINE)),$((SELECTED_RULE_LINE+3))d" "$CONFIG_FILE"
 
-        # 获取选择的规则
-        SELECTED_RULE_LINE=${RULES[$((CHOICE-1))]}
+    # 删除多余的空白行
+    sed -i '/^$/d' "$CONFIG_FILE"
 
-        # 备份配置文件
-        cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
-
-        # 使用sed删除指定的块
-        sed -i "$((SELECTED_RULE_LINE)),$((SELECTED_RULE_LINE+3))d" "$CONFIG_FILE"
-
-        # 删除多余的空白行
-        sed -i '/^$/d' "$CONFIG_FILE"
-
-        if [ $? -eq 0 ]; then
-          echo "删除成功。"
-        else
-          echo "删除失败。以下是 systemctl 的状态信息："
-          systemctl status $SERVICE_NAME --no-pager
-        fi
-        ;;
-      2)
-        return  # 直接返回主菜单
-        ;;
-      *)
-        echo "错误：无效的选项"
-        ;;
-    esac
+    if [ $? -eq 0 ]; then
+      echo "删除成功。"
+    else
+      echo "删除失败。以下是 systemctl 的状态信息："
+      systemctl status $SERVICE_NAME --no-pager
+    fi
   done
 }
 
 # 查看已有规则
 function show_rules() {
   while true; do
-    echo "=============================="
+    # 检查配置文件是否存在
+    if [ ! -f "$CONFIG_FILE" ]; then
+      echo "错误：配置文件 $CONFIG_FILE 不存在"
+      return
+    fi
+
+    # 获取所有转发规则
+    RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
+
+    if [ ${#RULES[@]} -eq 0 ]; then
+      echo "没有找到任何转发规则"
+      return
+    fi
+
+    # 显示规则列表
+    echo "$SEPARATOR"
     echo "          查看已有规则        "
-    echo "=============================="
-    echo "1. 查看规则"
-    echo "2. 返回"
-    echo "=============================="
-    read -p "请输入选项 (1-2): " SHOW_OPTION
+    echo "$SEPARATOR"
+    echo "已添加的转发规则："
+    for i in "${!RULES[@]}"; do
+      ALIAS=$(sed -n "$((RULES[i]+1))p" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2)
+      LISTEN=$(sed -n "$((RULES[i]+2))p" "$CONFIG_FILE" | grep "listen" | cut -d '"' -f 2)
+      REMOTE=$(sed -n "$((RULES[i]+3))p" "$CONFIG_FILE" | grep "remote" | cut -d '"' -f 2)
+      echo "$((i+1)). $ALIAS -- $LISTEN ==> $REMOTE"
+    done
+    echo "$SEPARATOR"
+    read -p "请输入选项 (回车返回): " CHOICE
 
-    case $SHOW_OPTION in
-      1)
-        # 检查配置文件是否存在
-        if [ ! -f "$CONFIG_FILE" ]; then
-          echo "错误：配置文件 $CONFIG_FILE 不存在"
-          return
-        fi
+    # 如果用户直接按回车，则返回
+    if [[ -z $CHOICE ]]; then
+      return
+    fi
 
-        # 获取所有转发规则
-        RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
+    # 检查输入是否有效
+    if [[ $CHOICE != "0" ]]; then
+      echo "错误：无效的选择"
+      continue
+    fi
 
-        if [ ${#RULES[@]} -eq 0 ]; then
-          echo "没有找到任何转发规则"
-          return
-        fi
-
-        echo "已添加的转发规则："
-        for i in "${!RULES[@]}"; do
-          ALIAS=$(sed -n "$((RULES[i]+1))p" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2)
-          LISTEN=$(sed -n "$((RULES[i]+2))p" "$CONFIG_FILE" | grep "listen" | cut -d '"' -f 2)
-          REMOTE=$(sed -n "$((RULES[i]+3))p" "$CONFIG_FILE" | grep "remote" | cut -d '"' -f 2)
-          echo "$ALIAS -- $LISTEN ==> $REMOTE"
-        done
-        ;;
-      2)
-        return  # 直接返回主菜单
-        ;;
-      *)
-        echo "错误：无效的选项"
-        ;;
-    esac
+    # 返回主菜单
+    return
   done
 }
 
