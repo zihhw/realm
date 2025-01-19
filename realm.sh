@@ -1,8 +1,12 @@
 #!/bin/bash
 
 # 定义变量
-CONFIG_FILE="$(dirname "$0")/realm.toml"  # 脚本当前目录下的 realm.toml
-SERVICE_NAME="realm.service"  # realm 服务名称
+REALM_VERSION="v2.4.5"  # 替换为最新的 realm 版本
+REALM_URL="https://github.com/zhboner/realm/releases/download/${REALM_VERSION}/realm-x86_64-unknown-linux-gnu.tar.gz"
+REALM_BIN="/usr/local/bin/realm"
+CONFIG_FILE="/etc/realm/realm.toml"
+SERVICE_FILE="/etc/systemd/system/realm.service"
+SERVICE_NAME="realm.service"
 
 # 检查是否以 root 用户运行
 if [ "$EUID" -ne 0 ]; then
@@ -10,7 +14,75 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 显示菜单
+# 安装依赖
+function install_dependencies() {
+  echo "安装依赖：wget 和 tar..."
+  apt-get update && apt-get install -y wget tar
+}
+
+# 下载并安装 realm
+function install_realm() {
+  echo "下载 realm..."
+  wget -O /tmp/realm.tar.gz "$REALM_URL"
+  if [ $? -ne 0 ]; then
+    echo "错误：下载 realm 失败"
+    exit 1
+  fi
+
+  echo "解压 realm..."
+  tar -xzf /tmp/realm.tar.gz -C /tmp
+  if [ $? -ne 0 ]; then
+    echo "错误：解压 realm 失败"
+    exit 1
+  fi
+
+  echo "安装 realm 到 /usr/local/bin..."
+  mv /tmp/realm "$REALM_BIN"
+  chmod +x "$REALM_BIN"
+}
+
+# 创建配置文件目录和默认配置
+function create_config() {
+  echo "创建配置文件目录 /etc/realm..."
+  mkdir -p /etc/realm
+
+  echo "创建默认的 realm.toml 配置文件..."
+  cat <<EOF > "$CONFIG_FILE"
+[network]
+no_tcp = false
+use_udp = true
+EOF
+}
+
+# 创建 systemd 服务文件
+function create_service() {
+  echo "创建 systemd 服务文件..."
+  cat <<EOF > "$SERVICE_FILE"
+[Unit]
+Description=Realm - A simple and fast relay tool
+After=network.target
+
+[Service]
+ExecStart=$REALM_BIN -c $CONFIG_FILE
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  echo "重新加载 systemd 配置..."
+  systemctl daemon-reload
+
+  echo "启动并启用 realm 服务..."
+  systemctl start realm
+  systemctl enable realm
+
+  echo "检查 realm 服务状态..."
+  systemctl status realm --no-pager
+}
+
+# 显示管理菜单
 function show_menu() {
   echo "=============================="
   echo "          Realm 管理脚本      "
@@ -18,6 +90,7 @@ function show_menu() {
   echo "1. 添加转发规则"
   echo "2. 删除转发规则"
   echo "3. 查看已有规则"
+  echo "4. 卸载 realm"
   echo "0. 退出并重启服务"
   echo "=============================="
 }
@@ -32,190 +105,308 @@ function validate_ip_port() {
   fi
 }
 
+# 检查端口是否被占用
+function is_port_used() {
+  local port=$1
+  if ss -tuln | grep -q ":$port "; then
+    return 0  # 端口已被占用
+  else
+    return 1  # 端口未被占用
+  fi
+}
+
 # 添加转发规则
 function add_rule() {
   while true; do
-    read -p "请输入本机端口（例如 2005）: " LOCAL_PORT
-    if [[ $LOCAL_PORT =~ ^[0-9]+$ ]]; then
-      break
-    else
-      echo "错误：本机端口必须是数字"
-    fi
+    echo "=============================="
+    echo "          添加转发规则        "
+    echo "=============================="
+    echo "1. 添加新规则"
+    echo "2. 返回"
+    echo "=============================="
+    read -p "请输入选项 (1-2): " ADD_OPTION
+
+    case $ADD_OPTION in
+      1)
+        while true; do
+          read -p "请输入转发端口（1-65535）: " FORWARD_PORT
+          if [[ $FORWARD_PORT =~ ^[0-9]+$ ]] && [ $FORWARD_PORT -ge 1 ] && [ $FORWARD_PORT -le 65535 ]; then
+            if is_port_used "$FORWARD_PORT"; then
+              echo "错误：转发端口 $FORWARD_PORT 已被占用"
+            else
+              break
+            fi
+          else
+            echo "错误：转发端口必须是 1-65535 之间的数字"
+          fi
+        done
+
+        while true; do
+          read -p "请输入欲转发地址（例如 1.1.1.1:443）: " TARGET_ADDRESS
+          if validate_ip_port "$TARGET_ADDRESS"; then
+            break
+          else
+            echo "错误：欲转发地址格式无效，请输入 IP:端口"
+          fi
+        done
+
+        read -p "请输入规则别名（例如 游戏服务器）: " ALIAS
+
+        # 检查端口是否已存在
+        if grep -q "listen = \"0.0.0.0:$FORWARD_PORT\"" "$CONFIG_FILE"; then
+          echo "错误：转发端口 $FORWARD_PORT 已存在"
+          return
+        fi
+
+        # 添加规则到配置文件
+        echo -e "\n[[endpoints]]" >> "$CONFIG_FILE"
+        echo "alias = \"$ALIAS\"" >> "$CONFIG_FILE"
+        echo "listen = \"0.0.0.0:$FORWARD_PORT\"" >> "$CONFIG_FILE"
+        echo "remote = \"$TARGET_ADDRESS\"" >> "$CONFIG_FILE"
+        echo "已添加转发规则：$ALIAS -- 0.0.0.0:$FORWARD_PORT -> $TARGET_ADDRESS"
+        ;;
+      2)
+        return  # 直接返回主菜单
+        ;;
+      *)
+        echo "错误：无效的选项"
+        ;;
+    esac
   done
-
-  while true; do
-    read -p "请输入远程地址（例如 1.1.1.1:443）: " REMOTE
-    if validate_ip_port "$REMOTE"; then
-      break
-    else
-      echo "错误：远程地址格式无效，请输入 IP:端口"
-    fi
-  done
-
-  read -p "请输入规则别名（例如 游戏服务器）: " ALIAS
-
-  # 检查端口是否已存在
-  if grep -q "listen = \"0.0.0.0:$LOCAL_PORT\"" "$CONFIG_FILE"; then
-    echo "错误：本机端口 $LOCAL_PORT 已存在"
-    return
-  fi
-
-  # 添加规则到配置文件
-  echo -e "\n[[endpoints]]" >> "$CONFIG_FILE"
-  echo "alias = \"$ALIAS\"" >> "$CONFIG_FILE"
-  echo "listen = \"0.0.0.0:$LOCAL_PORT\"" >> "$CONFIG_FILE"
-  echo "remote = \"$REMOTE\"" >> "$CONFIG_FILE"
-  echo "已添加转发规则：$ALIAS -- 0.0.0.0:$LOCAL_PORT -> $REMOTE"
 }
 
 # 删除转发规则
 function remove_rule() {
-  # 获取所有转发规则
-  RULES=($(grep -A 2 "\[\[endpoints\]\]" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2))
+  while true; do
+    echo "=============================="
+    echo "          删除转发规则        "
+    echo "=============================="
+    echo "1. 删除规则"
+    echo "2. 返回"
+    echo "=============================="
+    read -p "请输入选项 (1-2): " REMOVE_OPTION
 
-  if [ ${#RULES[@]} -eq 0 ]; then
-    echo "错误：没有找到任何转发规则"
-    return
-  fi
+    case $REMOVE_OPTION in
+      1)
+        # 获取所有转发规则
+        RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
 
-  # 显示规则列表
-  echo "请选择要删除的转发规则："
-  for i in "${!RULES[@]}"; do
-    echo "$((i+1)). ${RULES[$i]}"
+        if [ ${#RULES[@]} -eq 0 ]; then
+          echo "错误：没有找到任何转发规则"
+          return
+        fi
+
+        # 显示规则列表
+        echo "请选择要删除的转发规则："
+        for i in "${!RULES[@]}"; do
+          ALIAS=$(sed -n "$((RULES[i]+1))p" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2)
+          LISTEN=$(sed -n "$((RULES[i]+2))p" "$CONFIG_FILE" | grep "listen" | cut -d '"' -f 2)
+          REMOTE=$(sed -n "$((RULES[i]+3))p" "$CONFIG_FILE" | grep "remote" | cut -d '"' -f 2)
+          echo "$((i+1)). $ALIAS -- $LISTEN -> $REMOTE"
+        done
+
+        # 读取用户输入
+        read -p "请输入规则编号 (1-${#RULES[@]}): " CHOICE
+
+        # 检查输入是否有效
+        if [[ ! $CHOICE =~ ^[0-9]+$ ]] || [ $CHOICE -lt 1 ] || [ $CHOICE -gt ${#RULES[@]} ]; then
+          echo "错误：无效的选择"
+          return
+        fi
+
+        # 获取选择的规则
+        SELECTED_RULE_LINE=${RULES[$((CHOICE-1))]}
+
+        # 备份配置文件
+        cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
+
+        # 使用sed删除指定的块
+        sed -i "$((SELECTED_RULE_LINE)),$((SELECTED_RULE_LINE+3))d" "$CONFIG_FILE"
+
+        # 删除多余的空白行
+        sed -i '/^$/d' "$CONFIG_FILE"
+
+        if [ $? -eq 0 ]; then
+          echo "删除成功。"
+        else
+          echo "删除失败。以下是 systemctl 的状态信息："
+          systemctl status $SERVICE_NAME --no-pager
+        fi
+        ;;
+      2)
+        return  # 直接返回主菜单
+        ;;
+      *)
+        echo "错误：无效的选项"
+        ;;
+    esac
   done
-
-  # 读取用户输入
-  read -p "请输入规则编号 (1-${#RULES[@]}): " CHOICE
-
-  # 检查输入是否有效
-  if [[ ! $CHOICE =~ ^[0-9]+$ ]] || [ $CHOICE -lt 1 ] || [ $CHOICE -gt ${#RULES[@]} ]; then
-    echo "错误：无效的选择"
-    return
-  fi
-
-  # 获取选择的规则
-  SELECTED_RULE="${RULES[$((CHOICE-1))]}"
-
-  # 备份配置文件
-  cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
-
-  # 使用awk删除指定的块
-  awk -v del_alias="$SELECTED_RULE" '
-    /\[\[endpoints\]\]/ {
-      if (block != "") {
-        print block
-      }
-      block = ""
-      delete_flag = 0
-    }
-    /alias = "'"$SELECTED_RULE"'"/ {
-      delete_flag = 1
-    }
-    {
-      if (!delete_flag) {
-        block = block $0 "\n"
-      }
-    }
-    END {
-      if (block != "" && !delete_flag) {
-        print block
-      }
-    }
-  ' "$CONFIG_FILE" > "$CONFIG_FILE.new" && mv "$CONFIG_FILE.new" "$CONFIG_FILE"
-
-  # 删除多余的空白行
-  sed -i '/^$/d' "$CONFIG_FILE"
-
-  echo "已删除转发规则：$SELECTED_RULE"
 }
 
 # 查看已有规则
 function show_rules() {
-  # 检查配置文件是否存在
-  if [ ! -f "$CONFIG_FILE" ]; then
-    echo "错误：配置文件 $CONFIG_FILE 不存在"
-    return
-  fi
+  while true; do
+    echo "=============================="
+    echo "          查看已有规则        "
+    echo "=============================="
+    echo "1. 查看规则"
+    echo "2. 返回"
+    echo "=============================="
+    read -p "请输入选项 (1-2): " SHOW_OPTION
 
-  # 获取所有转发规则
-  RULES=($(awk '
-    /\[\[endpoints\]\]/ {
-      if (alias != "" || listen != "" || remote != "") {
-        print alias, listen, remote
-      }
-      alias = ""
-      listen = ""
-      remote = ""
-    }
-    /alias = / {
-      alias = $3
-      gsub(/"/, "", alias)
-    }
-    /listen = / {
-      listen = $3
-      gsub(/"/, "", listen)
-    }
-    /remote = / {
-      remote = $3
-      gsub(/"/, "", remote)
-    }
-    END {
-      if (alias != "" || listen != "" || remote != "") {
-        print alias, listen, remote
-      }
-    }
-  ' "$CONFIG_FILE"))
+    case $SHOW_OPTION in
+      1)
+        # 检查配置文件是否存在
+        if [ ! -f "$CONFIG_FILE" ]; then
+          echo "错误：配置文件 $CONFIG_FILE 不存在"
+          return
+        fi
 
-  if [ ${#RULES[@]} -eq 0 ]; then
-    echo "没有找到任何转发规则"
-    return
-  fi
+        # 获取所有转发规则
+        RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
 
-  echo "已添加的转发规则："
-  for ((i=0; i<${#RULES[@]}; i+=3)); do
-    ALIAS="${RULES[$i]}"
-    LISTEN="${RULES[$((i+1))]}"
-    REMOTE="${RULES[$((i+2))]}"
-    if [[ -z "$ALIAS" ]]; then
-      ALIAS="未命名规则"
-    fi
-    echo "$ALIAS -- $LISTEN ==> $REMOTE"
+        if [ ${#RULES[@]} -eq 0 ]; then
+          echo "没有找到任何转发规则"
+          return
+        fi
+
+        echo "已添加的转发规则："
+        for i in "${!RULES[@]}"; do
+          ALIAS=$(sed -n "$((RULES[i]+1))p" "$CONFIG_FILE" | grep "alias" | cut -d '"' -f 2)
+          LISTEN=$(sed -n "$((RULES[i]+2))p" "$CONFIG_FILE" | grep "listen" | cut -d '"' -f 2)
+          REMOTE=$(sed -n "$((RULES[i]+3))p" "$CONFIG_FILE" | grep "remote" | cut -d '"' -f 2)
+          echo "$ALIAS -- $LISTEN ==> $REMOTE"
+        done
+        ;;
+      2)
+        return  # 直接返回主菜单
+        ;;
+      *)
+        echo "错误：无效的选项"
+        ;;
+    esac
   done
 }
 
 # 重启 realm 服务
 function restart_realm() {
-  echo "重启 realm 服务..."
   systemctl restart $SERVICE_NAME
-  systemctl status $SERVICE_NAME --no-pager
+  if [ $? -eq 0 ]; then
+    echo "重启 realm 服务成功。"
+  else
+    echo "重启失败。以下是 systemctl 的状态信息："
+    systemctl status $SERVICE_NAME --no-pager
+  fi
 }
 
-# 主循环
-while true; do
-  show_menu
-  read -p "请输入选项 (0-3): " OPTION
+# 卸载 realm
+function uninstall_realm() {
+  read -p "确定要卸载 realm 吗？(y/n): " CONFIRM
+  if [[ $CONFIRM != "y" && $CONFIRM != "Y" ]]; then
+    echo "卸载已取消。"
+    return
+  fi
 
-  case $OPTION in
-    1)
-      add_rule
-      ;;
-    2)
-      remove_rule
-      ;;
-    3)
-      show_rules
-      ;;
-    0)
-      echo "退出脚本并重启服务..."
-      restart_realm
-      break
-      ;;
-    *)
-      echo "错误：无效的选项"
-      ;;
-  esac
+  echo "停止 realm 服务..."
+  systemctl stop $SERVICE_NAME
+  if [ $? -ne 0 ]; then
+    echo "停止服务失败。以下是 systemctl 的状态信息："
+    systemctl status $SERVICE_NAME --no-pager
+    return 1
+  fi
 
-  # 按任意键继续
-  read -p "按任意键继续..." -n 1
-  echo
-done
+  echo "禁用 realm 服务..."
+  systemctl disable $SERVICE_NAME
+  if [ $? -ne 0 ]; then
+    echo "禁用服务失败。以下是 systemctl 的状态信息："
+    systemctl status $SERVICE_NAME --no-pager
+    return 1
+  fi
+
+  echo "删除 realm 二进制文件..."
+  rm -f "$REALM_BIN"
+  if [ $? -ne 0 ]; then
+    echo "删除二进制文件失败。"
+    return 1
+  fi
+
+  echo "删除配置文件..."
+  rm -rf "/etc/realm"
+  if [ $? -ne 0 ]; then
+    echo "删除配置文件失败。"
+    return 1
+  fi
+
+  echo "删除 systemd 服务文件..."
+  rm -f "$SERVICE_FILE"
+  if [ $? -ne 0 ]; then
+    echo "删除 systemd 服务文件失败。"
+    return 1
+  fi
+
+  echo "重新加载 systemd 配置..."
+  systemctl daemon-reload
+  if [ $? -ne 0 ]; then
+    echo "重新加载 systemd 配置失败。"
+    return 1
+  fi
+
+  echo "realm 已卸载完成！"
+}
+
+# 主安装函数
+function install_and_setup() {
+  install_dependencies
+  install_realm
+  create_config
+  create_service
+  echo "realm 安装和配置完成！"
+}
+
+# 主管理循环
+function manage_realm() {
+  while true; do
+    show_menu
+    read -p "请输入选项 (0-4): " OPTION
+
+    case $OPTION in
+      1)
+        add_rule
+        ;;
+      2)
+        remove_rule
+        ;;
+      3)
+        show_rules
+        ;;
+      4)
+        uninstall_realm
+        break
+        ;;
+      0)
+        echo "退出脚本并重启服务..."
+        restart_realm
+        break
+        ;;
+      *)
+        echo "错误：无效的选项"
+        ;;
+    esac
+
+    # 按任意键继续（仅在主菜单显示）
+    if [[ $OPTION -ne 1 && $OPTION -ne 2 && $OPTION -ne 3 ]]; then
+      read -p "按任意键继续..." -n 1
+      echo
+    fi
+  done
+}
+
+# 主逻辑
+if [ ! -f "$REALM_BIN" ]; then
+  echo "realm 未安装，开始安装..."
+  install_and_setup
+else
+  echo "realm 已安装，进入管理菜单..."
+fi
+
+manage_realm
