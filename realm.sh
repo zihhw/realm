@@ -112,6 +112,16 @@ function validate_ip_port() {
   fi
 }
 
+# 检查域名:端口 格式是否有效
+function validate_domain_port() {
+  local input=$1
+  if [[ $input =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # 检查端口是否被占用
 function is_port_used() {
   local port=$1
@@ -129,8 +139,13 @@ function add_rule() {
     echo "          添加转发规则        "
     echo "$SEPARATOR"
 
+    # 输入转发端口（仅在此步骤提供返回选项）
     while true; do
-      read -p "请输入转发端口（1-65535）: " FORWARD_PORT
+      read -p "请输入转发端口（1-65535，回车返回）: " FORWARD_PORT
+      if [[ -z $FORWARD_PORT ]]; then
+        echo "返回主菜单。"
+        return
+      fi
       if [[ $FORWARD_PORT =~ ^[0-9]+$ ]] && [ $FORWARD_PORT -ge 1 ] && [ $FORWARD_PORT -le 65535 ]; then
         if is_port_used "$FORWARD_PORT"; then
           echo "错误：转发端口 $FORWARD_PORT 已被占用"
@@ -142,16 +157,27 @@ function add_rule() {
       fi
     done
 
+    # 输入欲转发地址（不提供返回选项）
     while true; do
-      read -p "请输入欲转发地址（例如 1.1.1.1:443）: " TARGET_ADDRESS
-      if validate_ip_port "$TARGET_ADDRESS"; then
+      read -p "请输入欲转发地址（例如 1.1.1.1:443 或 example.com:443）: " TARGET_ADDRESS
+      if validate_ip_port "$TARGET_ADDRESS" || validate_domain_port "$TARGET_ADDRESS"; then
         break
       else
-        echo "错误：欲转发地址格式无效，请输入 IP:端口"
+        echo "错误：欲转发地址格式无效，请输入 IP:端口 或 域名:端口"
       fi
     done
 
-    read -p "请输入规则别名（例如 游戏服务器）: " ALIAS
+    # 输入规则别名（不提供返回选项）
+    while true; do
+      read -p "请输入规则别名（例如 游戏服务器）: " ALIAS
+      if [[ -z $ALIAS ]]; then
+        echo "错误：别名不能为空"
+      elif [[ $ALIAS =~ [[:space:]] ]]; then
+        echo "错误：别名不能包含空格"
+      else
+        break
+      fi
+    done
 
     # 检查端口是否已存在
     if grep -q "listen = \"0.0.0.0:$FORWARD_PORT\"" "$CONFIG_FILE"; then
@@ -178,7 +204,7 @@ function add_rule() {
 function remove_rule() {
   while true; do
     # 获取所有转发规则
-    RULES=($(grep -n '$\[endpoints$\]' "$CONFIG_FILE" | cut -d ':' -f 1))
+    RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
 
     if [ ${#RULES[@]} -eq 0 ]; then
       echo "错误：没有找到任何转发规则"
