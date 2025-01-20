@@ -178,7 +178,7 @@ function add_rule() {
 function remove_rule() {
   while true; do
     # 获取所有转发规则
-    RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d ':' -f 1))
+    RULES=($(grep -n '$\[endpoints$\]' "$CONFIG_FILE" | cut -d ':' -f 1))
 
     if [ ${#RULES[@]} -eq 0 ]; then
       echo "错误：没有找到任何转发规则"
